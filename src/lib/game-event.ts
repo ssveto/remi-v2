@@ -73,6 +73,8 @@ export interface CardAddedToMeldEvent extends GameEvent {
   playerIndex: number;
   card: Card;
   meldIndex: number; // Which existing meld was extended
+  meldOwner: number;
+  replacedJoker?: Card | null;
 }
 
 export interface MeldValidationResultEvent extends GameEvent {

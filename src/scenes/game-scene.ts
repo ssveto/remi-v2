@@ -43,7 +43,7 @@ const LAYOUT = {
 const MELD_CONFIG = {
   // Position above hand
   START_X: 300,
-  START_Y: 420,  // Above hand area
+  START_Y: 410,  // Above hand area
 
   // Spacing
   CARD_OVERLAP: 25,      // Cards overlap in same meld
@@ -253,6 +253,15 @@ export class GameScene extends Phaser.Scene {
       }
 
     } else if (zoneType === ZONE_TYPE.MELD_TABLE) {
+
+      if (this.#logic.getState().phase === GamePhase.DRAW) {
+        this.#showMessage("Vuci kartu prvo!");
+        gameObject.setPosition(
+          gameObject.getData('origX') as number,
+          gameObject.getData('origY') as number
+        );
+        return;
+      }
       this.#handleDropOnMeldTable(gameObject, dropZone)
     }
   }
@@ -285,7 +294,7 @@ export class GameScene extends Phaser.Scene {
 
       // Card count text (shows hand size)
       const cardCount = this.add
-        .text(0, iconSize / 2 + 10, "14", {
+        .text(40, iconSize - 50, "14", {
           fontSize: "12px",
           fontFamily: "Arial",
           color: "#ffffff",
@@ -326,10 +335,6 @@ export class GameScene extends Phaser.Scene {
   }
 
   #viewPlayerMelds(playerIndex: number): void {
-    if (playerIndex === 0) {
-      this.#showMessage("Your melds are always visible on the table");
-      return;
-    }
 
     if (!this.#logic.hasPlayerOpened(playerIndex)) {
       this.#showMessage(`Player ${playerIndex + 1} has no melds yet`);
@@ -351,11 +356,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   #showMeldView(playerIndex: number): void {
-    const playerMelds = this.#allPlayerMelds.get(playerIndex);
+    const playerMelds = this.#allPlayerMelds.get(playerIndex) || [];
     if (!playerMelds || playerMelds.length === 0) return;
 
     this.#closeMeldView();
     this.#currentViewingPlayer = playerIndex;
+
     this.#meldViewContainer = this.add.container(0, 0);
 
     const START_X = 300;
@@ -363,9 +369,29 @@ export class GameScene extends Phaser.Scene {
     const CARD_OVERLAP = 25;
     const MELD_SPACING = 50;
 
-    playerMelds.forEach((meld, meldIdx) => {
-      const baseX = START_X + meldIdx * MELD_SPACING;
+    let currentX = START_X;
 
+    playerMelds.forEach((meld, meldIdx) => {
+      const baseX = currentX + meldIdx * MELD_SPACING;
+
+      // Create drop zone for this meld
+      const meldPosition = {
+        x: baseX,
+        y: START_Y
+      };
+
+      const { dropZone, highlight } = this.#createMeldDropZone(
+        meldPosition,
+        meld.cardData.length,
+        meldIdx,
+        playerIndex // Use the playerIndex parameter (meld owner)
+      );
+
+      // Add drop zone and highlight to the container
+      this.#meldViewContainer?.add(dropZone);
+      this.#meldViewContainer?.add(highlight);
+
+      // Render cards
       meld.cardData.forEach((card, cardIdx) => {
         const cardImage = this.add
           .image(
@@ -375,23 +401,14 @@ export class GameScene extends Phaser.Scene {
             this.#getCardFrame(card)
           )
           .setOrigin(0)
-          .setScale(SCALE * 0.9)
+          .setScale(SCALE)
           .setDepth(10 + cardIdx);
 
         this.#meldViewContainer?.add(cardImage);
       });
+
+      currentX += meld.cardData.length * CARD_OVERLAP + MELD_SPACING;
     });
-
-    // // Add semi-transparent background
-    // const bg = this.add
-    //   .rectangle(0, 0, this.scale.width, 200, 0x000000, 0.7)
-    //   .setOrigin(0)
-    //   .setDepth(999)
-    //   .setInteractive();
-
-    // bg.on('pointerdown', () => this.#closeMeldView());
-
-    // this.#meldViewContainer?.addAt(bg, 0);
   }
 
   #closeMeldView(): void {
@@ -410,6 +427,13 @@ export class GameScene extends Phaser.Scene {
 
     const indicator = icon.getAt(3) as Phaser.GameObjects.Arc;
     indicator.setVisible(hasMelds);
+  }
+
+  #refreshMeldViewIfOpen(): void {
+    // If we're currently viewing a player's melds, refresh the view
+    if (this.#currentViewingPlayer !== null && this.#meldViewContainer) {
+      this.#showMeldView(this.#currentViewingPlayer);
+    }
   }
 
   #createPhaseIndicator(): void {
@@ -439,7 +463,10 @@ export class GameScene extends Phaser.Scene {
 
     // Meldsc
     this.#logic.on(GameEventType.MELDS_LAID_DOWN,
-      (e) => this.#onMeldsLaidDown(e as MeldsLaidDownEvent));
+      (e) => {
+        this.#onMeldsLaidDown(e as MeldsLaidDownEvent);
+          this.#refreshMeldViewIfOpen();
+      });
     this.#logic.on(GameEventType.CARD_ADDED_TO_MELD,
       (e) => this.#onCardAddedToMeld(e as CardAddedToMeldEvent));
     this.#logic.on(GameEventType.MELD_VALIDATION_RESULT,
@@ -744,11 +771,18 @@ export class GameScene extends Phaser.Scene {
 
   #onCardAddedToMeld(event: CardAddedToMeldEvent): void {
     if (event.playerIndex !== 0) {
-      // AI player - ignore for now
+      // AI player performing action - ignore for now
       return;
     }
 
-    const playerMelds = this.#allPlayerMelds.get(event.playerIndex) || [];
+    // Only handle visual updates for adding to own melds (meldOwner === 0)
+    // Adding to other players' melds is handled in #addCardToOtherPlayerMeld
+    if (event.meldOwner !== 0) {
+      return; // Skip - already handled
+    }
+
+    const playerMelds = this.#allPlayerMelds.get(event.meldOwner) || [];
+
     // Find the meld
     const meld = playerMelds.find(m => m.meldIndex === event.meldIndex);
     if (!meld) {
@@ -777,7 +811,12 @@ export class GameScene extends Phaser.Scene {
     this.#updateCardsInHand();
     this.#updateDropZonesForHand();
 
-    this.#showMessage('Card added to meld!');
+    // Handle joker replacement message
+    if (event.replacedJoker) {
+      this.#showMessage('Joker returned to your hand!');
+    } else {
+      this.#showMessage('Card added to meld!');
+    }
   }
 
   #addCardToMeldDisplay(
@@ -852,9 +891,9 @@ export class GameScene extends Phaser.Scene {
 
     // Validate with logic layer
     const success = this.#logic.addCardToMeld(
-      0,           // player index
+      0,           // player index (current player)
       card,        // card to add
-      meldOwner,           // meld owner
+      meldOwner,   // meld owner
       meldIndex    // which meld
     );
 
@@ -865,8 +904,62 @@ export class GameScene extends Phaser.Scene {
         cardGO.getData('origX') as number,
         cardGO.getData('origY') as number
       );
+      return;
     }
-    // If successful, event handler will update visuals
+
+    // Success - handle visual update based on meld owner
+    if (meldOwner === 0) {
+      // Adding to own meld - event handler will take care of it
+      // (existing behavior)
+    } else {
+      // Adding to another player's meld - manually update the view
+      this.#addCardToOtherPlayerMeld(meldOwner, meldIndex, cardGO, card);
+    }
+  }
+
+  #addCardToOtherPlayerMeld(
+    playerIndex: number,
+    meldIndex: number,
+    cardGO: Phaser.GameObjects.Image,
+    card: Card
+  ): void {
+    // Get the meld data
+    const playerMelds = this.#allPlayerMelds.get(playerIndex);
+    if (!playerMelds || !playerMelds[meldIndex]) {
+      console.error('Meld not found');
+      return;
+    }
+
+    const meldData = playerMelds[meldIndex];
+
+    // Update the stored card data
+    meldData.cardData.push(card);
+
+    // Remove the card from hand display FIRST (before destroying)
+    const cardIndex = this.#cardsInHand.indexOf(cardGO);
+    if (cardIndex > -1) {
+      this.#cardsInHand.splice(cardIndex, 1);
+    }
+
+    // Clear selection state
+    this.#selectedCards.delete(cardGO);
+
+    // Stop any ongoing tweens on this card to prevent onComplete callbacks
+    this.tweens.killTweensOf(cardGO);
+
+    // Destroy the card GameObject
+    cardGO.destroy();
+
+    // Update hand display
+    this.#updateCardsInHand();
+
+    // If we're currently viewing this player's melds, refresh the view
+    if (this.#currentViewingPlayer === playerIndex && this.#meldViewContainer) {
+      // Small delay to let hand animation finish first
+      this.time.delayedCall(100, () => {
+        this.#showMeldView(playerIndex);
+      });
+    }
   }
 
   #disableCardInteraction(cardGO: Phaser.GameObjects.Image): void {
@@ -998,13 +1091,13 @@ export class GameScene extends Phaser.Scene {
           targets: cardGO,
           x: finalX,
           y: finalY,
-          scale: SCALE * MELD_CONFIG.CARD_SCALE,
+          scale: SCALE,
           rotation: 0,
           duration: MELD_CONFIG.ANIMATION_DURATION,
           delay,
           ease: 'Back.easeOut',
           onStart: () => {
-            cardGO.setDepth(100 + cardIndex); // Above hand
+            cardGO.setDepth(10 + cardIndex); // Above hand
           },
           onComplete: () => {
             // Disable all interaction
@@ -1414,13 +1507,13 @@ export class GameScene extends Phaser.Scene {
   #createMeldButton(): void {
     // Button background
     const bg = this.add
-      .rectangle(0, 0, 140, 45, 0x4caf50, 1)
+      .rectangle(0, 0, 130, 40, 0x4caf50, 1)
       .setStrokeStyle(2, 0x2e7d32)
       .setInteractive({ useHandCursor: true });
 
     // Button text
     const text = this.add
-      .text(0, 0, 'Lay Meld', {
+      .text(0, 0, 'Izbaci karte!', {
         fontSize: '16px',
         fontFamily: 'Arial',
         color: '#ffffff',
@@ -1429,7 +1522,7 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0.5);
 
     // Container for both
-    this.#meldButton = this.add.container(this.scale.width / 2, 550, [
+    this.#meldButton = this.add.container(this.scale.width / 2, 540, [
       bg,
       text,
     ]);
@@ -1614,7 +1707,7 @@ export class GameScene extends Phaser.Scene {
       // 2. AI "Thinks" about Melding and Discarding
       // We add a delay to simulate thought and let the draw animation finish
       this.time.delayedCall(1000, () => {
-        
+
         // This calculates the BEST move based on the hand AFTER drawing
         const plan = this.#ai.planMeldAndDiscard(this.#logic, aiIndex);
 
@@ -1635,7 +1728,7 @@ export class GameScene extends Phaser.Scene {
           // Ensure the card to discard is actually in hand (safety check)
           const currentHand = this.#logic.getPlayerHand(aiIndex);
           const cardInHand = currentHand.find(c => c.id === plan.cardToDiscard.id);
-          
+
           if (cardInHand) {
             this.#logic.discardCard(aiIndex, cardInHand);
           } else {
