@@ -23,20 +23,20 @@ const LAYOUT = {
   CARD_SPACING: 38 * 2,
   MIN_SCALE: 0.4,
   MAX_CARDS_IN_HAND: 15,
-  PLAYER_HAND: { x: 30 * 2, y: 300 * 2 },
+  PLAYER_HAND: { x: 30 * 2, y: 290 * 2 },
   DISCARD_PILE: { x: 370 * 2, y: 130 * 2 },
   DRAW_PILE: { x: 210 * 2, y: 130 * 2 },
   DISCARD_DROP_ZONE_PADDING: 75,
   DRAW_ZONE_OFFSET: 10,
   ANIMATION_DURATION: 100,
-  MELD_TABLE: {
-    START_X: 300,
-    START_Y: 450, // Below the hand
-    MELD_SPACING_X: 50, // Space between melds horizontally
-    MELD_SPACING_Y: 100, // Space between rows of melds
-    CARD_SPACING_IN_MELD: 25, // Overlap cards in same meld
-    // MAX_MELDS_PER_ROW: 3,
-  },
+  // MELD_TABLE: {
+  //   START_X: 300,
+  //   START_Y: 450, // Below the hand
+  //   MELD_SPACING_X: 50, // Space between melds horizontally
+  //   MELD_SPACING_Y: 100, // Space between rows of melds
+  //   CARD_SPACING_IN_MELD: 25, // Overlap cards in same meld
+  //   // MAX_MELDS_PER_ROW: 3,
+  // },
   DROP_ZONE_EXPANSION: 60,
 } as const;
 
@@ -62,6 +62,7 @@ const MELD_CONFIG = {
 
 interface PlayerMeld {
   meldIndex: number;                      // Index in logic layer
+  meldOwner: number;
   cards: Phaser.GameObjects.Image[];     // Visual cards
   cardData: Card[];                      // Actual card data
   position: { x: number; y: number };    // Base position
@@ -100,9 +101,10 @@ export class GameScene extends Phaser.Scene {
   #currentValidation: MeldValidationResult | null = null;
   #meldScoreText!: Phaser.GameObjects.Text;
   #meldButton!: Phaser.GameObjects.Container;
-  #playerMelds: PlayerMeld[] = [];
   #playerIcons: Phaser.GameObjects.Container[] = [];
-
+  #currentViewingPlayer: number = 0; // 0 = viewing own melds
+  #meldViewContainer: Phaser.GameObjects.Container | null = null;
+  #allPlayerMelds: Map<number, PlayerMeld[]> = new Map();
 
   constructor() {
     super({ key: SCENE_KEYS.GAME });
@@ -120,7 +122,7 @@ export class GameScene extends Phaser.Scene {
     this.#dropZonesInHand = [];
 
     // Start game
-    this.#logic.newGame(2);
+    this.#logic.newGame(3);
     this.#ai = new AIPlayer({
       difficulty: AIDifficulty.MEDIUM,
       thinkDelay: 800,
@@ -129,13 +131,16 @@ export class GameScene extends Phaser.Scene {
 
     this.#createDropZoneForDiscard();
 
-    this.#playerMelds = [];
+
+    // Initialize meld storage for all players
+    for (let i = 0; i < this.#logic.getState().numPlayers; i++) {
+      this.#allPlayerMelds.set(i, []);
+    }
 
     this.#createMeldScoreDisplay();
     this.#createMeldButton();
     this.#createPhaseIndicator();
     this.#createDragEvents();
-    this.#clearPlayerMelds()
     this.#createPlayerIcons();
   }
 
@@ -216,14 +221,14 @@ export class GameScene extends Phaser.Scene {
       }
     } else if (zoneType === ZONE_TYPE.DISCARD) {
 
-    if (this.#logic.getState().phase === GamePhase.DRAW) {
-      this.#showMessage("Vuci kartu prvo!");
-      gameObject.setPosition(
+      if (this.#logic.getState().phase === GamePhase.DRAW) {
+        this.#showMessage("Vuci kartu prvo!");
+        gameObject.setPosition(
           gameObject.getData('origX') as number,
           gameObject.getData('origY') as number
         );
-      return;
-    }
+        return;
+      }
       // Discard card
       //const card = gameObject.getData('cardId') as Card;
       const card = this.#getCardFromGameObject(gameObject);
@@ -246,67 +251,165 @@ export class GameScene extends Phaser.Scene {
           gameObject.getData('origY') as number
         );
       }
-      
+
     } else if (zoneType === ZONE_TYPE.MELD_TABLE) {
       this.#handleDropOnMeldTable(gameObject, dropZone)
     }
   }
 
-   #createPlayerIcons(): void {
-  const iconSize = 50;
-  const spacing = 70;
-  const startX = this.scale.width - 80;
-  const startY = 80;
+  #createPlayerIcons(): void {
+    const iconSize = 50;
+    const spacing = 70;
+    const startX = this.scale.width - 80;
+    const startY = 80;
 
-  for (let i = 1; i < this.#logic.getState().numPlayers; i++) {
-    const y = startY + (i -1) * spacing;
+    const numPlayers = this.#logic.getState().numPlayers;
 
-    // Background circle
-    const circle = this.add
-    .circle(0, 0, iconSize / 2, 0x666666, 1)
-    .setStrokeStyle(3, 0x333333);
+    for (let i = 1; i < numPlayers; i++) {
+      const y = startY + (i - 1) * spacing;
 
-    // Player number
-    const text = this.add
-    .text(0, 0, `P${i + 1}`, {
-      fontSize: "20px",
-      fontFamily: "Arial",
-      color: "#ffffff",
-      fontStyle: "bold",
-    })
-    .setOrigin(0.5);
+      // Background circle
+      const circle = this.add
+        .circle(0, 0, iconSize / 2, 0x666666, 1)
+        .setStrokeStyle(3, 0x333333);
 
-    // Meld indicator (small green dot, hidden by default)
-    const indicator = this.add
-    .circle(iconSize / 3, -iconSize / 3, 8, 0x00ff00, 1)
-    .setStrokeStyle(2, 0xffffff)
-    .setVisible(false);
+      // Player number
+      const text = this.add
+        .text(0, 0, `P${i + 1}`, {
+          fontSize: "20px",
+          fontFamily: "Arial",
+          color: "#ffffff",
+          fontStyle: "bold",
+        })
+        .setOrigin(0.5);
 
-    // Container for all elements
-    const container = this.add.container(startX, y, [
-      circle,
-      text,
-      indicator,
-    ]);
+      // Card count text (shows hand size)
+      const cardCount = this.add
+        .text(0, iconSize / 2 + 10, "14", {
+          fontSize: "12px",
+          fontFamily: "Arial",
+          color: "#ffffff",
+        })
+        .setOrigin(0.5);
 
-    // Make interactive for all AI players
-    circle.setInteractive({ useHandCursor: true });
+      // Meld indicator (small green dot, hidden by default)
+      const indicator = this.add
+        .circle(iconSize / 3, -iconSize / 3, 8, 0x00ff00, 1)
+        .setStrokeStyle(2, 0xffffff)
+        .setVisible(false);
 
-    circle.on("pointerover", () => {
-      circle.setFillStyle(0x888888);
-    });
+      // Container for all elements
+      const container = this.add.container(startX, y, [
+        circle,
+        text,
+        cardCount,
+        indicator,
+      ]);
 
-    circle.on("pointerout", () => {
-      circle.setFillStyle(0x666666);
-    });
+      // Make interactive
+      circle.setInteractive({ useHandCursor: true });
 
-    circle.on("pointerdown", () => {
-      //this.#viewPlayerMelds(i);
-    });
+      circle.on("pointerover", () => {
+        circle.setFillStyle(0x888888);
+      });
 
-    // Store with original player index
-    this.#playerIcons[i] = container;
+      circle.on("pointerout", () => {
+        circle.setFillStyle(0x666666);
+      });
+
+      circle.on("pointerdown", () => {
+        this.#viewPlayerMelds(i);
+      });
+
+      this.#playerIcons[i] = container;
+    }
   }
+
+  #viewPlayerMelds(playerIndex: number): void {
+    if (playerIndex === 0) {
+      this.#showMessage("Your melds are always visible on the table");
+      return;
+    }
+
+    if (!this.#logic.hasPlayerOpened(playerIndex)) {
+      this.#showMessage(`Player ${playerIndex + 1} has no melds yet`);
+      return;
+    }
+
+    // Toggle view
+    if (this.#currentViewingPlayer === playerIndex && this.#meldViewContainer) {
+      this.#closeMeldView();
+      return;
+    }
+
+    if (this.#meldViewContainer) {
+      this.#closeMeldView();
+    }
+
+    this.#currentViewingPlayer = playerIndex;
+    this.#showMeldView(playerIndex);
+  }
+
+  #showMeldView(playerIndex: number): void {
+    const playerMelds = this.#allPlayerMelds.get(playerIndex);
+    if (!playerMelds || playerMelds.length === 0) return;
+
+    this.#closeMeldView();
+    this.#currentViewingPlayer = playerIndex;
+    this.#meldViewContainer = this.add.container(0, 0);
+
+    const START_X = 300;
+    const START_Y = 100;
+    const CARD_OVERLAP = 25;
+    const MELD_SPACING = 50;
+
+    playerMelds.forEach((meld, meldIdx) => {
+      const baseX = START_X + meldIdx * MELD_SPACING;
+
+      meld.cardData.forEach((card, cardIdx) => {
+        const cardImage = this.add
+          .image(
+            baseX + cardIdx * CARD_OVERLAP,
+            START_Y,
+            ASSET_KEYS.CARDS,
+            this.#getCardFrame(card)
+          )
+          .setOrigin(0)
+          .setScale(SCALE * 0.9)
+          .setDepth(10 + cardIdx);
+
+        this.#meldViewContainer?.add(cardImage);
+      });
+    });
+
+    // // Add semi-transparent background
+    // const bg = this.add
+    //   .rectangle(0, 0, this.scale.width, 200, 0x000000, 0.7)
+    //   .setOrigin(0)
+    //   .setDepth(999)
+    //   .setInteractive();
+
+    // bg.on('pointerdown', () => this.#closeMeldView());
+
+    // this.#meldViewContainer?.addAt(bg, 0);
+  }
+
+  #closeMeldView(): void {
+    if (this.#meldViewContainer) {
+      this.#meldViewContainer.destroy();
+      this.#meldViewContainer = null;
+    }
+    this.#currentViewingPlayer = 0;
+  }
+
+  #updatePlayerIconStatus(playerIndex: number, hasMelds: boolean): void {
+    if (playerIndex === 0) return;
+
+    const icon = this.#playerIcons[playerIndex];
+    if (!icon) return;
+
+    const indicator = icon.getAt(3) as Phaser.GameObjects.Arc;
+    indicator.setVisible(hasMelds);
   }
 
   #createPhaseIndicator(): void {
@@ -570,10 +673,12 @@ export class GameScene extends Phaser.Scene {
     let totalScore = this.#logic.currentScore();
     this.#meldScoreText.setText(`${totalScore}`);
 
+    const playerMelds = this.#allPlayerMelds.get(0) || [];
+
     // Color based on requirement
     if (totalScore === 0) {
       this.#meldScoreText.setColor('#ffffff'); // White
-    } else if (totalScore >= 51 || this.#playerMelds.length > 1) {
+    } else if (totalScore >= 51 || playerMelds.length > 1) {
       this.#meldScoreText.setColor('#00ff00'); // Green - good!
     } else {
       this.#meldScoreText.setColor('#ff0000'); // Red - not enough
@@ -622,10 +727,10 @@ export class GameScene extends Phaser.Scene {
     );
 
     const state = this.#logic.getState();
-      if (state.phase === GamePhase.DRAW) {
-        this.#showMessage("Draw a card first!");
-        return;
-      }
+    if (state.phase === GamePhase.DRAW) {
+      this.#showMessage("Draw a card first!");
+      return;
+    }
 
     if (success) {
       // Clear selection (visual state)
@@ -643,10 +748,12 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    const playerMelds = this.#allPlayerMelds.get(event.playerIndex) || [];
     // Find the meld
-    const meld = this.#playerMelds.find(m => m.meldIndex === event.meldIndex);
+    const meld = playerMelds.find(m => m.meldIndex === event.meldIndex);
     if (!meld) {
       console.error('Meld not found:', event.meldIndex);
+      console.error('Available melds:', playerMelds.map(m => m.meldIndex));
       return;
     }
 
@@ -717,7 +824,8 @@ export class GameScene extends Phaser.Scene {
       const { dropZone, highlight } = this.#createMeldDropZone(
         meld.position,
         meld.cards.length,
-        meld.meldIndex
+        meld.meldIndex,
+        meld.meldOwner
       );
 
       meld.dropZone = dropZone;
@@ -730,6 +838,7 @@ export class GameScene extends Phaser.Scene {
     dropZone: Phaser.GameObjects.Zone
   ): void {
     const meldIndex = dropZone.getData('meldIndex') as number;
+    const meldOwner = dropZone.getData('playerIndex') as number;
     const card = this.#getCardFromGameObject(cardGO);
 
     if (!card) {
@@ -745,7 +854,7 @@ export class GameScene extends Phaser.Scene {
     const success = this.#logic.addCardToMeld(
       0,           // player index
       card,        // card to add
-      0,           // meld owner (self)
+      meldOwner,           // meld owner
       meldIndex    // which meld
     );
 
@@ -775,107 +884,92 @@ export class GameScene extends Phaser.Scene {
     cardGO.setData('zoneType', ZONE_TYPE.MELD_TABLE);
   }
 
-  /**
-   * Clear all player melds.
-   * Call this when starting a new game.
-   */
-  #clearPlayerMelds(): void {
-    this.#playerMelds.forEach(meld => {
-      // Destroy visuals
-      meld.cards.forEach(card => card.destroy());
-      meld.dropZone.destroy();
-      meld.highlight.destroy();
+  #displayPlayerMelds(playerIndex: number, newMelds: Card[][]): void {
+    // If player 0 (human), display on main table
+    if (playerIndex === 0) {
+      this.#displayHumanMelds(newMelds);
+      return;
+    }
+
+    // For AI players, just store the data and update icon
+    const playerMelds = this.#allPlayerMelds.get(playerIndex) || [];
+    const startMeldIndex = playerMelds.length;
+
+    newMelds.forEach((meldCards, offset) => {
+      const meldIndex = startMeldIndex + offset;
+
+      // Store meld data (no visuals yet)
+      const aiMeld: PlayerMeld = {
+        meldIndex,
+        meldOwner: playerIndex,
+        cards: [], // No visual cards until viewed
+        cardData: [...meldCards],
+        position: { x: 0, y: 0 }, // Calculated when viewed
+        dropZone: null as any, // Created when viewed
+        highlight: null as any,
+      };
+
+      playerMelds.push(aiMeld);
     });
 
-    this.#playerMelds = [];
+    this.#allPlayerMelds.set(playerIndex, playerMelds);
+    this.#updatePlayerIconStatus(playerIndex, true);
   }
 
 
-  #displayPlayerMelds(newMelds: Card[][]): void {
-  const startMeldIndex = this.#playerMelds.length;
+  #displayHumanMelds(newMelds: Card[][]): void {
+    const playerMelds = this.#allPlayerMelds.get(0) || [];
 
-  newMelds.forEach((meldCards, offset) => {
-    const meldIndex = startMeldIndex + offset;
-    const position = this.#calculateMeldPosition(meldIndex);
+    const allLogicMelds = this.#logic.getPlayerMelds(0);
 
-    // Collect card GameObjects
-    const cardGOs: Phaser.GameObjects.Image[] = [];
+    const startLogicIndex = allLogicMelds.length - newMelds.length;
 
-    // STEP 1: Find all cards and their indices (don't modify array yet)
-    const cardsToRemove: Array<{ index: number; cardGO: Phaser.GameObjects.Image }> = [];
+    newMelds.forEach((meldCards, offset) => {
+      const logicMeldIndex = startLogicIndex + offset;
 
-    meldCards.forEach((card) => {
-      const handIndex = this.#cardsInHand.findIndex(
-        go => go.getData('cardId') === card.id
-      );
+      const position = this.#calculateMeldPosition(logicMeldIndex);
 
-      if (handIndex === -1) {
-        console.error('Card not found in hand:', card.toString());
-        return;
-      }
+      // Collect card GameObjects
+      const cardGOs: Phaser.GameObjects.Image[] = [];
 
-      const cardGO = this.#cardsInHand[handIndex];
-      cardsToRemove.push({ index: handIndex, cardGO });
-    });
+      // STEP 1: Find all cards and their indices (don't modify array yet)
+      const cardsToRemove: Array<{ index: number; cardGO: Phaser.GameObjects.Image }> = [];
 
-    // STEP 2: Remove from hand in reverse order (so indices stay valid)
-    cardsToRemove
-      .sort((a, b) => b.index - a.index) // Sort descending by index
-      .forEach(({ cardGO }) => {
-        const currentIndex = this.#cardsInHand.indexOf(cardGO);
-        if (currentIndex !== -1) {
-          this.#cardsInHand.splice(currentIndex, 1);
+      meldCards.forEach((card) => {
+        const handIndex = this.#cardsInHand.findIndex(
+          go => go.getData('cardId') === card.id
+        );
+
+        if (handIndex === -1) {
+          console.error('Card not found in hand:', card.toString());
+          return;
         }
+
+        const cardGO = this.#cardsInHand[handIndex];
+        cardsToRemove.push({ index: handIndex, cardGO });
       });
 
-    // STEP 3: Process each card for animation
-    cardsToRemove.forEach(({ cardGO }, cardIndex) => {
-      // Clean up card state
-      cardGO.clearTint();
-      cardGO.setData('isSelected', false);
-      this.#selectedCards.delete(cardGO);
+      // STEP 2: Remove from hand in reverse order (so indices stay valid)
+      cardsToRemove
+        .sort((a, b) => b.index - a.index) // Sort descending by index
+        .forEach(({ cardGO }) => {
+          const currentIndex = this.#cardsInHand.indexOf(cardGO);
+          if (currentIndex !== -1) {
+            this.#cardsInHand.splice(currentIndex, 1);
+          }
+        });
 
-      // Calculate final position
-      const finalX = position.x + cardIndex * MELD_CONFIG.CARD_OVERLAP;
-      const finalY = position.y;
-
-      // Animate to meld position
-      const delay = offset * 200 + cardIndex * MELD_CONFIG.STAGGER_DELAY;
-
-      this.tweens.add({
-        targets: cardGO,
-        x: finalX,
-        y: finalY,
-        scale: SCALE * MELD_CONFIG.CARD_SCALE,
-        rotation: 0,
-        duration: MELD_CONFIG.ANIMATION_DURATION,
-        delay,
-        ease: 'Back.easeOut',
-        onStart: () => {
-          cardGO.setDepth(200 + cardIndex); // Above hand
-        },
-        onComplete: () => {
-          // Disable all interaction
-          this.#disableCardInteraction(cardGO);
-        }
-      });
-
-      cardGOs.push(cardGO);
-    });
-
-    // Create drop zone after animation completes
-    const dropZoneDelay = offset * 200 + meldCards.length * MELD_CONFIG.STAGGER_DELAY + 100;
-
-    this.time.delayedCall(dropZoneDelay, () => {
       const { dropZone, highlight } = this.#createMeldDropZone(
         position,
         meldCards.length,
-        meldIndex
+        logicMeldIndex,
+        0
       );
 
       // Store meld display
       const playerMeld: PlayerMeld = {
-        meldIndex,
+        meldIndex: logicMeldIndex,
+        meldOwner: 0,
         cards: cardGOs,
         cardData: [...meldCards],
         position,
@@ -883,10 +977,52 @@ export class GameScene extends Phaser.Scene {
         highlight,
       };
 
-      this.#playerMelds.push(playerMeld);
+      playerMelds.push(playerMeld);
+      this.#allPlayerMelds.set(0, playerMelds)
+
+      // STEP 3: Process each card for animation
+      cardsToRemove.forEach(({ cardGO }, cardIndex) => {
+        // Clean up card state
+        cardGO.clearTint();
+        cardGO.setData('isSelected', false);
+        this.#selectedCards.delete(cardGO);
+
+        // Calculate final position
+        const finalX = position.x + cardIndex * MELD_CONFIG.CARD_OVERLAP;
+        const finalY = position.y;
+
+        // Animate to meld position
+        const delay = offset * 200 + cardIndex * MELD_CONFIG.STAGGER_DELAY;
+
+        this.tweens.add({
+          targets: cardGO,
+          x: finalX,
+          y: finalY,
+          scale: SCALE * MELD_CONFIG.CARD_SCALE,
+          rotation: 0,
+          duration: MELD_CONFIG.ANIMATION_DURATION,
+          delay,
+          ease: 'Back.easeOut',
+          onStart: () => {
+            cardGO.setDepth(100 + cardIndex); // Above hand
+          },
+          onComplete: () => {
+            // Disable all interaction
+            this.#disableCardInteraction(cardGO);
+          }
+        });
+
+        cardGOs.push(cardGO);
+      });
+
+      // Create drop zone after animation completes
+      const dropZoneDelay = offset * 200 + meldCards.length * MELD_CONFIG.STAGGER_DELAY + 100;
+
+      this.time.delayedCall(dropZoneDelay, () => {
+        console.log('🎬 Animation complete for meld', logicMeldIndex);
+      });
     });
-  });
-}
+  }
 
   #calculateMeldPosition(meldIndex: number): { x: number; y: number } {
     const row = Math.floor(meldIndex / MELD_CONFIG.MAX_MELDS_PER_ROW);
@@ -901,7 +1037,8 @@ export class GameScene extends Phaser.Scene {
   #createMeldDropZone(
     position: { x: number; y: number },
     cardCount: number,
-    meldIndex: number
+    meldIndex: number,
+    meldOwner: number,
   ): { dropZone: Phaser.GameObjects.Zone; highlight: Phaser.GameObjects.Rectangle } {
     // Calculate zone size based on meld length
     const meldWidth =
@@ -921,7 +1058,7 @@ export class GameScene extends Phaser.Scene {
       .setData({
         zoneType: ZONE_TYPE.MELD_TABLE,
         meldIndex,
-        playerIndex: 0,
+        playerIndex: meldOwner,
       })
       .setDepth(150);
 
@@ -1032,12 +1169,25 @@ export class GameScene extends Phaser.Scene {
   }
 
   #onCardDrawn(event: CardDrawnEvent): void {
-    if (event.playerIndex !== 0) return; // Only show for human player
+    if (event.playerIndex === 0) {
+      // Your existing human player code
+      const cardGO = this.#createCardVisual(event.card);
+      this.#cardsInHand.push(cardGO);
+      this.#animateCardFromDeckToHand(cardGO, event.card);
+    } else {
+      // Update AI player icon
+      this.#updatePlayerCardCount(event.playerIndex, event.handSize);
+    }
+  }
 
-    const cardGO = this.#createCardVisual(event.card);
-    this.#cardsInHand.push(cardGO);
+  #updatePlayerCardCount(playerIndex: number, handSize: number): void {
+    if (playerIndex === 0) return;
 
-    this.#animateCardFromDeckToHand(cardGO, event.card);
+    const icon = this.#playerIcons[playerIndex];
+    if (!icon) return;
+
+    const cardCount = icon.getAt(2) as Phaser.GameObjects.Text;
+    cardCount.setText(`${handSize}`);
   }
 
   #createCardVisual(card: Card): Phaser.GameObjects.Image {
@@ -1089,6 +1239,9 @@ export class GameScene extends Phaser.Scene {
       y: LAYOUT.PLAYER_HAND.y - 170,
       duration: 300,
       ease: 'Back.easeOut',
+      onStart: () => {
+        cardGO.setDepth(30);
+      },
       onComplete: () => {
         this.#updateCardsInHand();
         this.#updateDropZonesForHand();
@@ -1298,31 +1451,29 @@ export class GameScene extends Phaser.Scene {
   }
 
   #onMeldsLaidDown(event: MeldsLaidDownEvent): void {
-    if (event.playerIndex !== 0) {
-      // AI player - ignore for now (handled by player icons)
-      console.log(`Player ${event.playerIndex + 1} laid down ${event.melds.length} melds`);
-      return;
+
+    this.#displayPlayerMelds(event.playerIndex, event.melds);
+
+
+    // Only update human player's UI state
+    if (event.playerIndex === 0) {
+      this.#selectedCards.clear();
+      this.#currentValidation = null;
+
+      this.time.delayedCall(100, () => {
+        this.#updateCardsInHand();
+        this.#updateDropZonesForHand();
+      });
+
+      const message = event.playerHasOpened
+        ? `Opened with ${event.meldScore} points! 🎉`
+        : `Laid down ${event.melds.length} meld${event.melds.length > 1 ? 's' : ''}!`;
+
+      this.#showMessage(message);
+    } else {
+      // AI player laid melds
+      this.#updatePlayerIconStatus(event.playerIndex, true);
     }
-
-    // Human player - display melds above hand
-    this.#displayPlayerMelds(event.melds);
-
-    // Clear selection
-    this.#selectedCards.clear();
-    this.#currentValidation = null;
-
-    // Update hand
-    this.time.delayedCall(100, () => {
-      this.#updateCardsInHand();
-      this.#updateDropZonesForHand();
-    });
-
-    // Show success message
-    const message = event.playerHasOpened
-      ? `Opened with ${event.meldScore} points! ðŸŽ‰`
-      : `Laid down ${event.melds.length} meld${event.melds.length > 1 ? 's' : ''}!`;
-
-    this.#showMessage(message);
   }
 
   #createCard(x: number,
@@ -1418,6 +1569,7 @@ export class GameScene extends Phaser.Scene {
     // Update discard pile visual for all players
     this.#discardPileCard.setFrame(this.#getCardFrame(event.card));
     this.#discardPileCard.setVisible(true);
+    this.#updatePlayerCardCount(event.playerIndex, event.handSize);
   }
 
   #createDrawPile(): void {
@@ -1441,35 +1593,55 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  // inside game-scene.ts class GameScene
+
   #runAITurn(): void {
     const aiIndex = this.#logic.getState().currentPlayer;
 
-    // IMPORTANT: Safety check
-    if (aiIndex === 0) {
-      return;
-    }
+    if (aiIndex === 0) return; // Safety check
 
-    this.time.delayedCall(300, () => {
-      const shouldDrawFromDiscard = this.#ai.shouldDrawFromDiscard(this.#logic, aiIndex);
+    // 1. AI "Thinks" about Drawing
+    this.time.delayedCall(500, () => {
+      // AI decides source
+      const drawFromDiscard = this.#ai.shouldDrawFromDiscard(this.#logic, aiIndex);
 
-      if (shouldDrawFromDiscard) {
+      if (drawFromDiscard) {
         this.#logic.drawFromDiscard(aiIndex);
       } else {
         this.#logic.drawCard(aiIndex);
       }
 
-      // Step 2: Meld decision (after draw)
-      this.time.delayedCall(500, () => {
-        const { meldsToLay, cardToDiscard } = this.#ai.planMeldAndDiscard(this.#logic, aiIndex);
+      // 2. AI "Thinks" about Melding and Discarding
+      // We add a delay to simulate thought and let the draw animation finish
+      this.time.delayedCall(1000, () => {
+        
+        // This calculates the BEST move based on the hand AFTER drawing
+        const plan = this.#ai.planMeldAndDiscard(this.#logic, aiIndex);
 
-        if (meldsToLay.length > 0) {
-          this.#logic.layDownMelds(aiIndex, meldsToLay);
+        // A. Lay Melds (if any)
+        if (plan.meldsToLay.length > 0) {
+          const success = this.#logic.layDownMelds(aiIndex, plan.meldsToLay);
+          if (!success) {
+            console.warn(`AI Player ${aiIndex} tried to lay invalid melds. Logic rejected it.`);
+          }
         }
 
-        // Step 3: Discard (after meld)
-        this.time.delayedCall(400, () => {
-          this.#logic.discardCard(aiIndex, cardToDiscard);
+        // B. Attempt to add cards to existing melds (optional Advanced feature)
+        // You can add logic here to check `this.#logic.getPlayerMelds(aiIndex)`
+        // and see if `plan.cardToDiscard` or others fit there.
 
+        // C. Discard
+        this.time.delayedCall(500, () => {
+          // Ensure the card to discard is actually in hand (safety check)
+          const currentHand = this.#logic.getPlayerHand(aiIndex);
+          const cardInHand = currentHand.find(c => c.id === plan.cardToDiscard.id);
+          
+          if (cardInHand) {
+            this.#logic.discardCard(aiIndex, cardInHand);
+          } else {
+            // Fallback if planning went wrong
+            this.#logic.discardCard(aiIndex, currentHand[0]);
+          }
         });
       });
     });
@@ -1497,9 +1669,9 @@ export class GameScene extends Phaser.Scene {
     });
   }
   #getCardFrame(data: Card): number {
-  if (data.value === 14) {
-    return data.suit === "JOKER_RED" ? 52 : 53;
+    if (data.value === 14) {
+      return data.suit === "JOKER_RED" ? 52 : 53;
+    }
+    return SUIT_FRAMES[data.suit] + data.value - 1;
   }
-  return SUIT_FRAMES[data.suit] + data.value - 1;
-}
 }
