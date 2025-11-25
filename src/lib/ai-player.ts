@@ -526,7 +526,7 @@ export class AIPlayer {
   // DISCARD STRATEGY (Enhanced with opponent modeling)
   // =========================================================================
 
-  private selectBestDiscard(
+  public selectBestDiscard(
     cards: Card[], 
     state: any,
     playerIndex: number,

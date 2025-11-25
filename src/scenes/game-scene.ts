@@ -105,6 +105,7 @@ export class GameScene extends Phaser.Scene {
   #currentViewingPlayer: number = 0; // 0 = viewing own melds
   #meldViewContainer: Phaser.GameObjects.Container | null = null;
   #allPlayerMelds: Map<number, PlayerMeld[]> = new Map();
+  #currentAITurnId: number | null = null;
 
   constructor() {
     super({ key: SCENE_KEYS.GAME });
@@ -130,7 +131,6 @@ export class GameScene extends Phaser.Scene {
     });
 
     this.#createDropZoneForDiscard();
-
 
     // Initialize meld storage for all players
     for (let i = 0; i < this.#logic.getState().numPlayers; i++) {
@@ -438,7 +438,7 @@ export class GameScene extends Phaser.Scene {
 
   #createPhaseIndicator(): void {
     this.#phaseIndicator = this.add
-      .text(80, 100, 'DRAW CARD', {
+      .text(80, 100, 'VUCI KARTU', {
         fontSize: '18px',
         fontFamily: 'Arial',
         color: '#ffffff',
@@ -465,7 +465,7 @@ export class GameScene extends Phaser.Scene {
     this.#logic.on(GameEventType.MELDS_LAID_DOWN,
       (e) => {
         this.#onMeldsLaidDown(e as MeldsLaidDownEvent);
-          this.#refreshMeldViewIfOpen();
+        this.#refreshMeldViewIfOpen();
       });
     this.#logic.on(GameEventType.CARD_ADDED_TO_MELD,
       (e) => this.#onCardAddedToMeld(e as CardAddedToMeldEvent));
@@ -746,6 +746,10 @@ export class GameScene extends Phaser.Scene {
     if (!this.#logic.hasPlayerOpened(0) && this.#logic.currentScore() < 51) return;
     if (this.#logic.hasPlayerOpened(0) && this.#logic.getCurrentMelds().length === 0) return;
 
+    if (this.#logic.getPlayerHand(0).length === 3) {
+      this.#showMessage("Mora ostati karta da je izbacis!");
+      return;
+    }
 
     // Use the already-validated melds!
     const success = this.#logic.layDownMelds(
@@ -755,7 +759,7 @@ export class GameScene extends Phaser.Scene {
 
     const state = this.#logic.getState();
     if (state.phase === GamePhase.DRAW) {
-      this.#showMessage("Draw a card first!");
+      this.#showMessage("Vuci kartu prvo!");
       return;
     }
 
@@ -944,11 +948,8 @@ export class GameScene extends Phaser.Scene {
     // Clear selection state
     this.#selectedCards.delete(cardGO);
 
-    // Stop any ongoing tweens on this card to prevent onComplete callbacks
-    this.tweens.killTweensOf(cardGO);
-
     // Destroy the card GameObject
-    cardGO.destroy();
+    this.#destroyCardSafely(cardGO);
 
     // Update hand display
     this.#updateCardsInHand();
@@ -1469,14 +1470,14 @@ export class GameScene extends Phaser.Scene {
 
   #onPhaseChanged(event: PhaseChangedEvent): void {
     const phaseText = {
-      [GamePhase.DRAW]: "DRAW CARD",
-      [GamePhase.MELD]: "MELD/DISCARD",
-      [GamePhase.DISCARD]: "DISCARD",
-      [GamePhase.GAME_OVER]: "GAME OVER",
+      [GamePhase.DRAW]: "VUCI KARTU",
+      [GamePhase.MELD]: "IGRAJ",
+      [GamePhase.DISCARD]: "IZBACI KARTU",
+      [GamePhase.GAME_OVER]: "IGRA ZAVRSENA",
     };
 
     if (this.#logic.getState().currentPlayer !== 0) {
-      this.#phaseIndicator.setText("Computer");
+      this.#phaseIndicator.setText("RACUNAR");
 
     } else {
       this.#phaseIndicator.setText(phaseText[event.newPhase]);
@@ -1484,6 +1485,7 @@ export class GameScene extends Phaser.Scene {
     }
 
   }
+
 
   #onTurnEnded(event: TurnEndedEvent): void {
     if (event.nextPlayer !== 0) {
@@ -1652,7 +1654,7 @@ export class GameScene extends Phaser.Scene {
           duration: 100,
           ease: 'Power2',
           onComplete: () => {
-            cardGO.destroy();
+            this.#destroyCardSafely(cardGO);
             this.#updateCardsInHand();
             this.#updateDropZonesForHand();
           }
@@ -1663,6 +1665,20 @@ export class GameScene extends Phaser.Scene {
     this.#discardPileCard.setFrame(this.#getCardFrame(event.card));
     this.#discardPileCard.setVisible(true);
     this.#updatePlayerCardCount(event.playerIndex, event.handSize);
+  }
+
+  #destroyCardSafely(cardGO: Phaser.GameObjects.Image): void {
+    // Remove all custom event listeners
+    cardGO.removeAllListeners();
+
+    // Remove from input system
+    this.input.setDraggable(cardGO, false);
+
+    // Kill any tweens affecting this card
+    this.tweens.killTweensOf(cardGO);
+
+    // Finally destroy the object
+    cardGO.destroy();
   }
 
   #createDrawPile(): void {
@@ -1689,55 +1705,107 @@ export class GameScene extends Phaser.Scene {
   // inside game-scene.ts class GameScene
 
   #runAITurn(): void {
+    // Only start AI turn if conditions are valid
+    if (!this.#canRunAITurn()) return;
+
     const aiIndex = this.#logic.getState().currentPlayer;
+    const turnId = Date.now(); // Unique ID for this turn
 
-    if (aiIndex === 0) return; // Safety check
+    // Store this turn ID to detect outdated actions
+    this.#currentAITurnId = turnId;
 
-    // 1. AI "Thinks" about Drawing
+    // STEP 1: DECIDE DRAW SOURCE
     this.time.delayedCall(500, () => {
-      // AI decides source
-      const drawFromDiscard = this.#ai.shouldDrawFromDiscard(this.#logic, aiIndex);
+      if (!this.#validateAITurn(turnId, aiIndex)) return;
 
-      if (drawFromDiscard) {
-        this.#logic.drawFromDiscard(aiIndex);
-      } else {
-        this.#logic.drawCard(aiIndex);
+      const drawFromDiscard = this.#ai.shouldDrawFromDiscard(this.#logic, aiIndex);
+      const drawSuccess = drawFromDiscard
+        ? this.#logic.drawFromDiscard(aiIndex)
+        : this.#logic.drawCard(aiIndex);
+
+      if (!drawSuccess) {
+        console.warn(`AI draw failed - aborting turn`);
+        return;
       }
 
-      // 2. AI "Thinks" about Melding and Discarding
-      // We add a delay to simulate thought and let the draw animation finish
-      this.time.delayedCall(1000, () => {
+      // STEP 2: PLAN MELDS & DISCARD
+      this.time.delayedCall(800, () => {
+        if (!this.#validateAITurn(turnId, aiIndex)) return;
 
-        // This calculates the BEST move based on the hand AFTER drawing
         const plan = this.#ai.planMeldAndDiscard(this.#logic, aiIndex);
 
-        // A. Lay Melds (if any)
+        // LAY DOWN MELDS IF ANY
         if (plan.meldsToLay.length > 0) {
-          const success = this.#logic.layDownMelds(aiIndex, plan.meldsToLay);
-          if (!success) {
-            console.warn(`AI Player ${aiIndex} tried to lay invalid melds. Logic rejected it.`);
+          const meldSuccess = this.#logic.layDownMelds(aiIndex, plan.meldsToLay);
+          if (!meldSuccess) {
+            console.warn(`AI meld attempt failed - continuing anyway`);
           }
         }
 
-        // B. Attempt to add cards to existing melds (optional Advanced feature)
-        // You can add logic here to check `this.#logic.getPlayerMelds(aiIndex)`
-        // and see if `plan.cardToDiscard` or others fit there.
+        // STEP 3: DISCARD
+        this.time.delayedCall(400, () => {
+          if (!this.#validateAITurn(turnId, aiIndex)) return;
 
-        // C. Discard
-        this.time.delayedCall(500, () => {
-          // Ensure the card to discard is actually in hand (safety check)
           const currentHand = this.#logic.getPlayerHand(aiIndex);
           const cardInHand = currentHand.find(c => c.id === plan.cardToDiscard.id);
 
           if (cardInHand) {
             this.#logic.discardCard(aiIndex, cardInHand);
-          } else {
-            // Fallback if planning went wrong
-            this.#logic.discardCard(aiIndex, currentHand[0]);
+          } else if (currentHand.length > 0) {
+            // Smart fallback: choose highest deadwood card
+            const fallbackCard = this.#ai.selectBestDiscard(
+              currentHand,
+              this.#logic.getState(),
+              aiIndex,
+              this.#logic
+            );
+            this.#logic.discardCard(aiIndex, fallbackCard);
+          }
+
+          // Clear turn ID when complete
+          if (this.#currentAITurnId === turnId) {
+            this.#currentAITurnId = null;
           }
         });
       });
     });
+  }
+
+  #canRunAITurn(): boolean {
+    const state = this.#logic.getState();
+    // Don't run AI if game is over
+    if (state.phase === GamePhase.GAME_OVER) return false;
+    // Don't run AI if it's not actually an AI player's turn
+    if (state.currentPlayer === 0) return false;
+    // Don't run multiple AI turns simultaneously
+    if (this.#currentAITurnId !== null) return false;
+    return true;
+  }
+
+  #validateAITurn(turnId: number, playerIndex: number): boolean {
+    // Check if this action belongs to a stale AI turn
+    if (this.#currentAITurnId !== turnId) {
+      console.log(`Stale AI turn detected - aborting action`);
+      return false;
+    }
+
+    const state = this.#logic.getState();
+
+    // Verify game hasn't ended
+    if (state.phase === GamePhase.GAME_OVER) {
+      console.log(`Game ended during AI turn - aborting`);
+      this.#currentAITurnId = null;
+      return false;
+    }
+
+    // Verify it's still this player's turn
+    if (state.currentPlayer !== playerIndex) {
+      console.log(`Turn changed during AI thinking - aborting`);
+      this.#currentAITurnId = null;
+      return false;
+    }
+
+    return true;
   }
 
   #showMessage(text: string): void {
