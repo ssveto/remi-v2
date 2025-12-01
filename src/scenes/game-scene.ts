@@ -24,11 +24,12 @@ const LAYOUT = {
   MIN_SCALE: 0.4,
   MAX_CARDS_IN_HAND: 15,
   PLAYER_HAND: { x: 30 * 2, y: 290 * 2 },
-  DISCARD_PILE: { x: 370 * 2, y: 130 * 2 },
-  DRAW_PILE: { x: 210 * 2, y: 130 * 2 },
+  DISCARD_PILE: { x: 390 * 2, y: 130 * 2 },
+  DRAW_PILE: { x: 200 * 2, y: 130 * 2 },
   DISCARD_DROP_ZONE_PADDING: 75,
   DRAW_ZONE_OFFSET: 10,
   ANIMATION_DURATION: 100,
+  FINISHING_CARD: { x: 640, y: 320 },
   // MELD_TABLE: {
   //   START_X: 300,
   //   START_Y: 450, // Below the hand
@@ -106,6 +107,10 @@ export class GameScene extends Phaser.Scene {
   #meldViewContainer: Phaser.GameObjects.Container | null = null;
   #allPlayerMelds: Map<number, PlayerMeld[]> = new Map();
   #currentAITurnId: number | null = null;
+  #finishingCard!: Phaser.GameObjects.Image;
+
+
+  #undoButton: Phaser.GameObjects.Container | null = null;
 
   constructor() {
     super({ key: SCENE_KEYS.GAME });
@@ -125,12 +130,12 @@ export class GameScene extends Phaser.Scene {
     // Start game
     this.#logic.newGame(3);
     this.#ai = new AIPlayer({
-      difficulty: AIDifficulty.MEDIUM,
+      difficulty: AIDifficulty.HARD,
       thinkDelay: 800,
-      randomness: 0.2,
+      randomness: 0.1,
     });
 
-    this.#createDropZoneForDiscard();
+
 
     // Initialize meld storage for all players
     for (let i = 0; i < this.#logic.getState().numPlayers; i++) {
@@ -241,15 +246,31 @@ export class GameScene extends Phaser.Scene {
         );
         return;
       }
+      if (this.#logic.hasDrawnFromDiscard() && this.#logic.getDiscardCard()) {
+        const cardWasUsed = this.#checkIfDiscardCardWasUsed();
+
+        if (!cardWasUsed) {
+          // Show undo option instead of allowing discard
+          this.#showUndoOption(gameObject);
+          return;
+        }
+      }
+
 
       const success = this.#logic.discardCard(0, card);
 
-      if (!success) {
+      if (success) {
+        // ⭐ Clear tracking flags
+        this.#logic.setHasDrawnFromDiscard();
+        this.#logic.setDiscardCard();
+        this.#logic.gameStateSnapshot = null;
+      } else {
         // Snap back if discard failed
         gameObject.setPosition(
           gameObject.getData('origX') as number,
           gameObject.getData('origY') as number
         );
+
       }
 
     } else if (zoneType === ZONE_TYPE.MELD_TABLE) {
@@ -264,6 +285,302 @@ export class GameScene extends Phaser.Scene {
       }
       this.#handleDropOnMeldTable(gameObject, dropZone)
     }
+  }
+
+  #createFinishingCard(): void {
+    // Visual container for finishing card  
+    const finishingCard = this.#logic.getFinishingCard();
+    if (!finishingCard) {
+      return;
+    }
+    // Card image (initially hidden)
+    this.#finishingCard = this.add.image(LAYOUT.FINISHING_CARD.x, LAYOUT.FINISHING_CARD.y, ASSET_KEYS.CARDS, this.#getCardFrame(finishingCard))
+      //.setOrigin(0)
+      .setScale(0.9)
+      .setInteractive({ useHandCursor: true })
+      .setData('isFinishingCard', true);
+
+    const drawFinishingCard = this.add
+      .zone(
+        LAYOUT.FINISHING_CARD.x,
+        LAYOUT.FINISHING_CARD.y,
+        CARD_WIDTH * SCALE,
+        CARD_HEIGHT * SCALE
+      )
+      .setInteractive({ useHandCursor: true })
+      .setDepth(50);
+    drawFinishingCard.on(Phaser.Input.Events.POINTER_DOWN, () => {
+      const state = this.#logic.getState();
+
+      if (state.phase !== GamePhase.DRAW) return;
+      if (state.currentPlayer !== 0) return;
+      if (!this.#logic.getFinishingCard()) return;
+
+      // ⭐ NEW: Save state before drawing from discard
+      this.#logic.saveGameStateSnapshot();
+      const success = this.#logic.takeFinishingCard(0);
+      //this.#logic.hasDrawnFinishingCard();
+      //this.#logic.setDiscardCard(state.topDiscardCard);
+
+      // Draw the card
+      //const success = this.#logic.drawFromDiscard(0);
+
+      if (success) {
+        this.#showMessage('Drew from discard - you must use this card in a meld!');
+        this.#finishingCard.setVisible(false).setInteractive(false);
+      }
+    });
+  }
+
+  #checkIfDiscardCardWasUsed(): boolean {
+    if (!this.#logic.getDiscardCard()) return true;
+
+    // Get all melds laid down this turn
+    const currentMelds = this.#logic.getPlayerMelds(0);
+    const initialMelds = this.#logic.gameStateSnapshot?.melds || [];
+
+    // Find new melds (laid down this turn)
+    const newMelds = currentMelds.slice(initialMelds.length);
+
+    // Check if the discard card is in any new meld
+    const cardIsInNewMelds = newMelds.some(meld =>
+      meld.some(c => c.id === this.#logic.getDiscardCard()!.id)
+    );
+
+    // Also check if card was added to existing melds
+    const cardIsInExistingMelds = currentMelds.some(meld =>
+      meld.some(c => c.id === this.#logic.getDiscardCard()!.id)
+    );
+
+    return cardIsInNewMelds || cardIsInExistingMelds;
+  }
+
+  #showUndoOption(cardGO: Phaser.GameObjects.Image): void {
+    // Return card to hand visually
+    cardGO.setPosition(
+      cardGO.getData('origX'),
+      cardGO.getData('origY')
+    );
+
+    // Create undo dialog
+    const dialogBg = this.add.rectangle(
+      400, 300,
+      500, 200,
+      0x000000,
+      0.8
+    ).setOrigin(0.5);
+
+    const message = this.add.text(
+      400, 260,
+      'You must use the discard card in a meld!\n\nUndo and draw from deck instead?',
+      {
+        fontSize: '18px',
+        color: '#ffffff',
+        align: 'center',
+        wordWrap: { width: 450 }
+      }
+    ).setOrigin(0.5);
+
+    const undoBtn = this.add.rectangle(
+      320, 340,
+      140, 40,
+      0x4CAF50
+    ).setOrigin(0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerover', () => undoBtn.setFillStyle(0x66BB6A))
+      .on('pointerout', () => undoBtn.setFillStyle(0x4CAF50))
+      .on('pointerdown', () => {
+        this.#executeUndo();
+        this.#undoButton?.destroy();
+        this.#undoButton = null;
+      });
+
+    const undoText = this.add.text(
+      320, 340,
+      'Undo & Draw from Deck',
+      {
+        fontSize: '16px',
+        color: '#ffffff'
+      }
+    ).setOrigin(0.5);
+
+    const cancelBtn = this.add.rectangle(
+      480, 340,
+      100, 40,
+      0xF44336
+    ).setOrigin(0.5)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerover', () => cancelBtn.setFillStyle(0xE57373))
+      .on('pointerout', () => cancelBtn.setFillStyle(0xF44336))
+      .on('pointerdown', () => {
+        this.#undoButton?.destroy();
+        this.#undoButton = null;
+        this.#showMessage('You must use the discard card or undo!');
+      });
+
+    const cancelText = this.add.text(
+      480, 340,
+      'Cancel',
+      {
+        fontSize: '16px',
+        color: '#ffffff'
+      }
+    ).setOrigin(0.5);
+
+    // Group everything
+    this.#undoButton = this.add.container(0, 0, [
+      dialogBg,
+      message,
+      undoBtn,
+      undoText,
+      cancelBtn,
+      cancelText
+    ]);
+
+    this.#undoButton.setDepth(1000);
+  }
+
+  // #executeUndo(): void {
+  //   if (!this.#logic.gameStateSnapshot) {
+  //     console.error('No snapshot to restore!');
+  //     return;
+  //   }
+
+  //   console.log('Executing undo - restoring game state');
+
+  //   // Restore game logic state (this requires adding an undo method to Remi)
+  //   // For now, we'll do a manual restoration
+
+  //   // 1. Remove all melds laid this turn
+  //   const currentMelds = this.#logic.getPlayerMelds(0);
+  //   const initialMelds = this.#logic.gameStateSnapshot.melds || [];
+  //   const meldsToRemove = currentMelds.length - initialMelds.length;
+
+  //   for (let i = 0; i < meldsToRemove; i++) {
+  //     this.#logic.removeLastMeld(0);
+  //   }
+
+  //   // 2. Clear visual melds that were laid this turn
+  //   const playerMelds = this.#allPlayerMelds.get(0) || [];
+  //   const meldsToDestroy = playerMelds.slice(initialMelds.length);
+
+  //   meldsToDestroy.forEach(meld => {
+  //     meld.cards.forEach(cardGO => this.#destroyCardSafely(cardGO));
+  //     meld.dropZone?.destroy();
+  //     meld.highlight?.destroy();
+  //   });
+
+  //   this.#allPlayerMelds.set(0, playerMelds.slice(0, initialMelds.length));
+
+  //   // 3. Return the discard card to discard pile
+  //   const hand = this.#logic.getPlayerHand(0);
+  //   const discardCardInHand = hand.find(c => c.id === this.#discardCardDrawn!.id);
+
+  //   if (discardCardInHand) {
+  //     // Remove from hand
+  //     const idx = hand.indexOf(discardCardInHand);
+  //     hand.splice(idx, 1);
+
+  //     // Return to discard pile (requires adding returnToDiscard method to Remi)
+  //     // this.#logic.returnCardToDiscard(discardCardInHand);
+  //   }
+
+  //   // 4. Remove visual card from hand
+  //   const cardGO = this.#cardsInHand.find(go =>
+  //     go.getData('cardId') === this.#discardCardDrawn!.id
+  //   );
+
+  //   if (cardGO) {
+  //     const idx = this.#cardsInHand.indexOf(cardGO);
+  //     this.#cardsInHand.splice(idx, 1);
+  //     this.#destroyCardSafely(cardGO);
+  //   }
+
+  //   // 5. Set phase back to DRAW
+  //   this.#logic.setPhase(GamePhase.DRAW);
+
+  //   // 6. Auto-draw from deck
+  //   this.time.delayedCall(300, () => {
+  //     const success = this.#logic.drawCard(0);
+  //     if (success) {
+  //       this.#showMessage('Drew from deck instead');
+
+  //       // Clear flags
+  //       this.#drewFromDiscard = false;
+  //       this.#discardCardDrawn = null;
+  //       this.#logic.gameStateSnapshot = null;
+  //     }
+  //   });
+
+  //   // 7. Update visuals
+  //   this.#updateCardsInHand();
+  //   this.#updateDropZonesForHand();
+  // }
+
+  #executeUndo(): void {
+    if (!this.#logic.gameStateSnapshot) {
+      console.error('No snapshot to restore!');
+      return;
+    }
+
+    console.log('Executing undo...');
+
+    // 1. Clear visual melds
+    const playerMelds = this.#allPlayerMelds.get(0) || [];
+    const initialMelds = this.#logic.gameStateSnapshot.melds;
+    const meldsToDestroy = playerMelds.slice(initialMelds.length);
+
+    meldsToDestroy.forEach(meld => {
+      meld.cards.forEach(cardGO => this.#destroyCardSafely(cardGO));
+      meld.dropZone?.destroy();
+      meld.highlight?.destroy();
+    });
+    this.#allPlayerMelds.set(0, playerMelds.slice(0, initialMelds.length));
+
+
+    // 2. ⭐ Restore logic state FIRST
+    this.#logic.restoreState(this.#logic.gameStateSnapshot);
+
+    // 3. Restore discard pile visual
+    // ✅ Correct: Check for null before using
+    const discardCard = this.#logic.getDiscardCard();
+    if (discardCard !== null) {
+      this.#discardPileCard.setFrame(this.#getCardFrame(discardCard));
+      this.#discardPileCard.setVisible(true);
+    } else {
+      // Handle the null case (optional)
+      this.#discardPileCard.setVisible(false);
+    }
+
+    // 4. ⭐ Rebuild visual hand from restored state
+    this.#cardsInHand.forEach(cardGO => this.#destroyCardSafely(cardGO));
+    this.#cardsInHand = [];
+
+    const restoredHand = this.#logic.getPlayerHand(0);
+    restoredHand.forEach((card, index) => {
+      const cardGO = this.#createCardVisual(card);
+      cardGO.setPosition(
+        LAYOUT.PLAYER_HAND.x + index * 38,
+        LAYOUT.PLAYER_HAND.y
+      );
+      this.#cardsInHand.push(cardGO);
+    });
+
+    this.#updateCardsInHand();
+    this.#updateDropZonesForHand();
+
+    // 5. ⭐ Now draw from deck
+    this.time.delayedCall(300, () => {
+      const success = this.#logic.drawCard(0);
+      if (success) {
+        this.#showMessage('Drew from deck instead');
+        this.#logic.setHasDrawnFromDiscard();
+        this.#logic.setDiscardCard();
+        this.#logic.gameStateSnapshot = null;
+      } else {
+        console.error("Draw failed! State:", this.#logic.getState());
+      }
+    });
   }
 
   #createPlayerIcons(): void {
@@ -356,8 +673,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   #showMeldView(playerIndex: number): void {
-    const playerMelds = this.#allPlayerMelds.get(playerIndex) || [];
-    if (!playerMelds || playerMelds.length === 0) return;
+    const visualMelds = this.#allPlayerMelds.get(playerIndex) || [];
+    const logicMelds = this.#logic.getPlayerMelds(playerIndex);
+    if (!visualMelds || visualMelds.length === 0) return;
 
     this.#closeMeldView();
     this.#currentViewingPlayer = playerIndex;
@@ -365,13 +683,16 @@ export class GameScene extends Phaser.Scene {
     this.#meldViewContainer = this.add.container(0, 0);
 
     const START_X = 300;
-    const START_Y = 100;
+    const START_Y = 80;
     const CARD_OVERLAP = 25;
     const MELD_SPACING = 50;
 
     let currentX = START_X;
 
-    playerMelds.forEach((meld, meldIdx) => {
+    visualMelds.forEach((meld, meldIdx) => {
+      if (logicMelds[meldIdx]) {
+        meld.cardData = [...logicMelds[meldIdx]]
+      }
       const baseX = currentX + meldIdx * MELD_SPACING;
 
       // Create drop zone for this meld
@@ -438,7 +759,7 @@ export class GameScene extends Phaser.Scene {
 
   #createPhaseIndicator(): void {
     this.#phaseIndicator = this.add
-      .text(80, 100, 'VUCI KARTU', {
+      .text(this.scale.width / 2, this.scale.height / 2 - 130, 'VUCI KARTU', {
         fontSize: '18px',
         fontFamily: 'Arial',
         color: '#ffffff',
@@ -456,8 +777,10 @@ export class GameScene extends Phaser.Scene {
     // Card movement
     this.#logic.on(GameEventType.CARD_DRAWN_FROM_DECK,
       (e) => this.#onCardDrawn(e as CardDrawnEvent));
-    // this.#logic.on(GameEventType.CARD_DRAWN_FROM_DISCARD,
-    //   (e) => this.#onCardDrawnFromDiscard(e as CardDrawnEvent));
+    this.#logic.on(GameEventType.CARD_DRAWN_FROM_DISCARD,
+      (e) => this.#onCardDrawnFromDiscard(e as CardDrawnEvent));
+    this.#logic.on(GameEventType.FINISHING_CARD,
+      (e) => this.#onFinishingCardDrawn(e as CardDrawnEvent));
     this.#logic.on(GameEventType.CARD_DISCARDED,
       (e) => this.#onCardDiscarded(e as CardDiscardedEvent));
 
@@ -494,6 +817,9 @@ export class GameScene extends Phaser.Scene {
     // Create initial visual elements
     this.#createDrawPile();
     this.#createDiscardPile();
+    this.#createFinishingCard();
+
+    this.#createDropZoneForDiscard();
     this.#createPlayerHandVisuals();
   }
 
@@ -526,6 +852,33 @@ export class GameScene extends Phaser.Scene {
     });
     this.#updateCardsInHand();
     this.#updateDropZonesForHand();
+  }
+  #onFinishingCardDrawn(event: CardDrawnEvent): void {
+    if (event.playerIndex !== 0) return;
+
+    const cardGO = this.#createCardVisual(event.card);
+    cardGO.setPosition(LAYOUT.FINISHING_CARD.x, LAYOUT.FINISHING_CARD.y).setInteractive();
+    this.#cardsInHand.push(cardGO);
+
+    // Animate from discard pile instead of draw pile
+    this.tweens.add({
+      targets: cardGO,
+      x: this.scale.width / 2 - 50,
+      y: LAYOUT.PLAYER_HAND.y - 170,
+      duration: 300,
+      ease: 'Back.easeOut',
+      onStart: () => {
+        cardGO.setDepth(30);
+      },
+      onComplete: () => {
+        cardGO.setDepth(0);
+        this.input.setDraggable(cardGO, true);
+        this.#makeCardSelectable(cardGO);
+        this.#updateCardsInHand();
+        this.#updateDropZonesForHand();
+      }
+    });
+
   }
 
   #makeCardSelectable(cardGO: Phaser.GameObjects.Image): void {
@@ -774,53 +1127,74 @@ export class GameScene extends Phaser.Scene {
   }
 
   #onCardAddedToMeld(event: CardAddedToMeldEvent): void {
-    if (event.playerIndex !== 0) {
-      // AI player performing action - ignore for now
-      return;
-    }
-
-    // Only handle visual updates for adding to own melds (meldOwner === 0)
-    // Adding to other players' melds is handled in #addCardToOtherPlayerMeld
-    if (event.meldOwner !== 0) {
-      return; // Skip - already handled
-    }
-
     const playerMelds = this.#allPlayerMelds.get(event.meldOwner) || [];
 
-    // Find the meld
+    // Find the meld being modified
     const meld = playerMelds.find(m => m.meldIndex === event.meldIndex);
     if (!meld) {
-      console.error('Meld not found:', event.meldIndex);
-      console.error('Available melds:', playerMelds.map(m => m.meldIndex));
+      console.error('Meld not found:', event.meldIndex, 'for owner', event.meldOwner);
       return;
     }
 
-    // Find card in hand
-    const handIndex = this.#cardsInHand.findIndex(
-      go => go.getData('cardId') === event.card.id
-    );
 
-    if (handIndex === -1) {
-      console.error('Card not found in hand:', event.card.toString());
-      return;
+    // ⭐ FIX: If meld doesn't have a position, calculate it (for human melds)
+    if (meld.meldOwner === 0 && (meld.position.x === 0 && meld.position.y === 0)) {
+      meld.position = this.#calculateMeldPosition(event.meldIndex);
     }
 
-    const cardGO = this.#cardsInHand[handIndex];
-    this.#cardsInHand.splice(handIndex, 1);
+    // Case 1: HUMAN adding card
+    if (event.playerIndex === 0) {
+      const handIndex = this.#cardsInHand.findIndex(
+        go => go.getData('cardId') === event.card.id
+      );
 
-    // Add to meld visually
-    this.#addCardToMeldDisplay(meld, cardGO, event.card);
+      if (handIndex === -1) {
+        console.error('Card not found in hand:', event.card.id);
+        return;
+      }
 
-    // Update hand
-    this.#updateCardsInHand();
-    this.#updateDropZonesForHand();
+      const cardGO = this.#cardsInHand[handIndex];
+      this.#cardsInHand.splice(handIndex, 1);
 
-    // Handle joker replacement message
-    if (event.replacedJoker) {
-      this.#showMessage('Joker returned to your hand!');
-    } else {
-      this.#showMessage('Card added to meld!');
+      this.#addCardToMeldDisplay(meld, cardGO, event.card);
+      this.#updateCardsInHand();
+      this.#updateDropZonesForHand();
+
+      if (event.replacedJoker) {
+        this.#showMessage('Joker returned to your hand!');
+      } else {
+        this.#showMessage('Card added to meld!');
+      }
     }
+    // Case 2: AI adding card (NEW!)
+    else {
+      // Create visual card for AI's addition
+      if (meld.meldOwner === 0) {
+        // Create visual card for AI's addition
+        const cardGO = this.add
+          .image(LAYOUT.DRAW_PILE.x, LAYOUT.DRAW_PILE.y, ASSET_KEYS.CARDS, this.#getCardFrame(event.card))
+          .setOrigin(0)
+          .setScale(SCALE)
+          .setDepth(300);
+
+        this.#addCardToMeldDisplay(meld, cardGO, event.card);
+
+        if (event.replacedJoker) {
+          this.#showMessage(`AI replaced your Joker!`);
+        } else {
+          this.#showMessage(`AI added card to your meld!`);
+        }
+      } else {
+        // AI adding to AI's meld - just update the data
+        meld.cardData.push(event.card);
+      }
+
+      // Update AI's card count
+      this.#updatePlayerCardCount(event.playerIndex, this.#logic.getPlayerHand(event.playerIndex).length);
+    }
+
+    // Refresh meld view if open
+    this.#refreshMeldViewIfOpen();
   }
 
   #addCardToMeldDisplay(
@@ -843,7 +1217,7 @@ export class GameScene extends Phaser.Scene {
       targets: cardGO,
       x: finalX,
       y: finalY,
-      scale: SCALE * MELD_CONFIG.CARD_SCALE,
+      // scale: SCALE * MELD_CONFIG.CARD_SCALE,
       rotation: 0,
       duration: 300,
       ease: 'Back.easeOut',
@@ -859,21 +1233,26 @@ export class GameScene extends Phaser.Scene {
     meld.cards.push(cardGO);
     meld.cardData.push(card);
 
-    // Recreate drop zone with new size
-    meld.dropZone.destroy();
-    meld.highlight.destroy();
+    if (meld.dropZone) {
+      meld.dropZone.destroy();
+    }
+    if (meld.highlight) {
+      meld.highlight.destroy();
+    }
 
-    this.time.delayedCall(350, () => {
-      const { dropZone, highlight } = this.#createMeldDropZone(
-        meld.position,
-        meld.cards.length,
-        meld.meldIndex,
-        meld.meldOwner
-      );
+    if (meld.meldOwner === 0) {
+      this.time.delayedCall(350, () => {
+        const { dropZone, highlight } = this.#createMeldDropZone(
+          meld.position,
+          meld.cards.length,
+          meld.meldIndex,
+          meld.meldOwner
+        );
 
-      meld.dropZone = dropZone;
-      meld.highlight = highlight;
-    });
+        meld.dropZone = dropZone;
+        meld.highlight = highlight;
+      });
+    }
   }
 
   #handleDropOnMeldTable(
@@ -903,6 +1282,10 @@ export class GameScene extends Phaser.Scene {
 
     if (!success) {
       // Invalid - snap back
+      const playerMelds = this.#allPlayerMelds.get(meldOwner) || [];
+      if (playerMelds[meldIndex].highlight) {
+        playerMelds[meldIndex].highlight.destroy();
+      }
       this.#showMessage('Card doesn\'t fit in this meld!');
       cardGO.setPosition(
         cardGO.getData('origX') as number,
@@ -933,11 +1316,6 @@ export class GameScene extends Phaser.Scene {
       console.error('Meld not found');
       return;
     }
-
-    const meldData = playerMelds[meldIndex];
-
-    // Update the stored card data
-    meldData.cardData.push(card);
 
     // Remove the card from hand display FIRST (before destroying)
     const cardIndex = this.#cardsInHand.indexOf(cardGO);
@@ -1252,8 +1630,42 @@ export class GameScene extends Phaser.Scene {
       LAYOUT.DISCARD_PILE.x,
       LAYOUT.DISCARD_PILE.y,
       true
-    ).setVisible(false);
+    ).setVisible(false)
+
+    const drawFromDiscardZone = this.add
+      .zone(
+        LAYOUT.DISCARD_PILE.x - 10,
+        LAYOUT.DISCARD_PILE.y - 10,
+        CARD_WIDTH * SCALE + 40,
+        CARD_HEIGHT * SCALE + 30
+      )
+      .setOrigin(0)
+      .setInteractive({ useHandCursor: true })
+      .setDepth(50);
+    drawFromDiscardZone.on(Phaser.Input.Events.POINTER_DOWN, () => {
+      const state = this.#logic.getState();
+      console.log("ne radi");
+
+      if (state.phase !== GamePhase.DRAW) return;
+      if (state.currentPlayer !== 0) return;
+      if (!state.topDiscardCard) return;
+
+      // ⭐ NEW: Save state before drawing from discard
+      this.#logic.saveGameStateSnapshot();
+      this.#logic.setHasDrawnFromDiscard(true);
+      this.#logic.setDiscardCard(state.topDiscardCard);
+
+      // Draw the card
+      const success = this.#logic.drawFromDiscard(0);
+
+      if (success) {
+        this.#showMessage('Drew from discard - you must use this card in a meld!');
+      }
+    });
+
   }
+
+
 
   #drawCardLocationBox(x: number, y: number, z: number): void {
     this.add
@@ -1449,10 +1861,10 @@ export class GameScene extends Phaser.Scene {
 
   #onGameOver(event: GameOverEvent): void {
     const message = event.winner === 0
-      ? "You win! ðŸŽ‰"
+      ? "You win!"
       : `Player ${event.winner + 1} wins!`;
 
-    this.#showMessage(message);
+    this.#showMessage(message, 5000);
     // Show final scores, play animation, etc.
   }
 
@@ -1485,7 +1897,6 @@ export class GameScene extends Phaser.Scene {
     }
 
   }
-
 
   #onTurnEnded(event: TurnEndedEvent): void {
     if (event.nextPlayer !== 0) {
@@ -1601,37 +2012,45 @@ export class GameScene extends Phaser.Scene {
       .setRectangleDropZone(CARD_WIDTH * SCALE + 150, CARD_HEIGHT * SCALE + 150)
       .setData({
         zoneType: ZONE_TYPE.DISCARD,
-      });
+      })
+      .setDepth(40);
   }
 
-  // #onCardDrawnFromDiscard(event: CardDrawnEvent): void {
-  //   if (event.playerIndex !== 0) return;
+  #onCardDrawnFromDiscard(event: CardDrawnEvent): void {
+    if (event.playerIndex !== 0) return;
 
-  //   // Similar to #onCardDrawn, but card comes from discard pile
-  //   const cardGO = this.#createCardVisual(event.card);
-  //   this.#cardsInHand.push(cardGO);
+    // Similar to #onCardDrawn, but card comes from discard pile
+    const cardGO = this.#createCardVisual(event.card);
+    cardGO.setPosition(LAYOUT.DISCARD_PILE.x, LAYOUT.DISCARD_PILE.y).setInteractive();
+    this.#cardsInHand.push(cardGO);
 
-  //   // Animate from discard pile instead of draw pile
-  //   this.tweens.add({
-  //     targets: cardGO,
-  //     x: LAYOUT.PLAYER_HAND.x,
-  //     y: LAYOUT.PLAYER_HAND.y,
-  //     duration: 300,
-  //     ease: 'Back.easeOut',
-  //     onComplete: () => {
-  //       this.#updateCardsInHand();
-  //       this.#updateDropZonesForHand();
-  //     }
-  //   });
+    // Animate from discard pile instead of draw pile
+    this.tweens.add({
+      targets: cardGO,
+      x: this.scale.width / 2 - 50,
+      y: LAYOUT.PLAYER_HAND.y - 170,
+      duration: 300,
+      ease: 'Back.easeOut',
+      onStart: () => {
+        cardGO.setDepth(30);
+      },
+      onComplete: () => {
+        cardGO.setDepth(0);
+        this.input.setDraggable(cardGO, true);
+        this.#makeCardSelectable(cardGO);
+        this.#updateCardsInHand();
+        this.#updateDropZonesForHand();
+      }
+    });
 
-  //   // Update discard pile visual
-  //   const state = this.#logic.getState();
-  //   if (state.discardPileSize === 0) {
-  //     this.#discardPileCard.setVisible(false);
-  //   } else if (state.topDiscardCard) {
-  //     this.#discardPileCard.setFrame(this.#getCardFrame(state.topDiscardCard));
-  //   }
-  // }
+    // Update discard pile visual
+    const state = this.#logic.getState();
+    if (state.discardPileSize === 0) {
+      this.#discardPileCard.setVisible(false);
+    } else if (state.topDiscardCard) {
+      this.#discardPileCard.setFrame(this.#getCardFrame(state.topDiscardCard));
+    }
+  }
 
   #onCardDiscarded(event: CardDiscardedEvent): void {
 
@@ -1645,6 +2064,8 @@ export class GameScene extends Phaser.Scene {
       if (cardIndex !== -1) {
         const cardGO = this.#cardsInHand[cardIndex];
         this.#cardsInHand.splice(cardIndex, 1);
+
+
 
         // Animate to discard pile
         this.tweens.add({
@@ -1742,8 +2163,46 @@ export class GameScene extends Phaser.Scene {
           }
         }
 
-        // STEP 3: DISCARD
-        this.time.delayedCall(400, () => {
+        // ⭐ NEW: STEP 2.5: ADD CARDS TO EXISTING MELDS
+        let additionDelay = 0;
+        if (plan.cardsToAddToMelds && plan.cardsToAddToMelds.length > 0) {
+          // Add each card with a slight delay for visual clarity
+          plan.cardsToAddToMelds.forEach((addition, index) => {
+            this.time.delayedCall(200 + (index * 300), () => {
+              if (!this.#validateAITurn(turnId, aiIndex)) return;
+
+              const success = this.#logic.addCardToMeld(
+                aiIndex,
+                addition.card,
+                addition.meldOwner,
+                addition.meldIndex
+              );
+
+              if (success) {
+                console.log(`AI added ${addition.card.value}${addition.card.suit} to meld`);
+
+                // Check if AI replaced a joker
+                const meldCards = this.#logic.getPlayerMelds(addition.meldOwner)[addition.meldIndex];
+                const hasJoker = meldCards.some(c =>
+                  c.suit === "JOKER_RED" || c.suit === "JOKER_BLACK"
+                );
+
+                if (!hasJoker && addition.meldOwner !== aiIndex) {
+                  // Joker was replaced!
+                  this.#showMessage(`AI stole your joker! 🃏`);
+                } else if (addition.meldOwner !== aiIndex) {
+                  this.#showMessage(`AI added card to your meld!`);
+                }
+              }
+            });
+          });
+
+          // Calculate total delay for all additions
+          additionDelay = 200 + (plan.cardsToAddToMelds.length * 300);
+        }
+
+        // STEP 3: DISCARD (after all meld additions complete)
+        this.time.delayedCall(400 + additionDelay, () => {
           if (!this.#validateAITurn(turnId, aiIndex)) return;
 
           const currentHand = this.#logic.getPlayerHand(aiIndex);
@@ -1753,11 +2212,12 @@ export class GameScene extends Phaser.Scene {
             this.#logic.discardCard(aiIndex, cardInHand);
           } else if (currentHand.length > 0) {
             // Smart fallback: choose highest deadwood card
-            const fallbackCard = this.#ai.selectBestDiscard(
+            const fallbackCard = this.#ai.selectBestDiscardAdvanced(
               currentHand,
               this.#logic.getState(),
               aiIndex,
-              this.#logic
+              this.#logic,
+              currentHand
             );
             this.#logic.discardCard(aiIndex, fallbackCard);
           }
@@ -1808,7 +2268,7 @@ export class GameScene extends Phaser.Scene {
     return true;
   }
 
-  #showMessage(text: string): void {
+  #showMessage(text: string, duration: number = 2000): void {
     const message = this.add
       .text(this.scale.width / 2, this.scale.height / 2 + 100, text, {
         fontSize: "24px",
@@ -1824,7 +2284,7 @@ export class GameScene extends Phaser.Scene {
       targets: message,
       alpha: 0,
       y: message.y - 30,
-      duration: 2000,
+      duration: duration,
       ease: "Power2",
       onComplete: () => message.destroy(),
     });

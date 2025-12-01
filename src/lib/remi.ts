@@ -44,6 +44,15 @@ export class Remi {
   #numPlayers: number = 0;
   #currentMelds: Card[][] = [];
   #currentScore: number = 0;
+  #drewFromDiscard: boolean = false;
+  #discardCardDrawn: Card | null = null;
+  #finishingCard: Card | null = null;
+  #finishingCardDrawn: boolean = false;
+  gameStateSnapshot: {
+    hand: Card[];
+    melds: Card[][];
+    phase: GamePhase;
+  } | null = null;
 
   constructor() { }
 
@@ -76,6 +85,16 @@ export class Remi {
       }
     }
 
+    const nonJokers = this.#deck.drawPile.filter(card => !this.#isJoker(card));
+    if (nonJokers.length > 0) {
+      const randomIndex = Math.floor(Math.random() * nonJokers.length);
+
+      this.#finishingCard = nonJokers[randomIndex];
+    } else {
+      this.#finishingCard = null;
+      console.warn("The draw pile contains no non-Joker cards to select from.");
+    }
+
     // Emit events
     this.#events.emit({
       type: GameEventType.GAME_STARTED,
@@ -90,6 +109,36 @@ export class Remi {
       playerIndex: 0,
       phase: GamePhase.DRAW,
     });
+  }
+
+  public getFinishingCard(): Card | null {
+    return this.#finishingCard;
+  }
+
+  public hasDrawnFinishingCard(): boolean {
+    return this.#finishingCardDrawn;
+  }
+
+  public canPlayerFinishNow(playerIndex: number): boolean {
+    // Player can finish if they can lay down all cards and discard one
+    const hand = this.getPlayerHand(playerIndex);
+    return hand.length < 2; // 1 card to meld + 1 to discard
+  }
+
+  public getDiscardCard(): Card | null {
+    return this.#discardCardDrawn;
+  }
+
+  public hasDrawnFromDiscard(): boolean {
+    return this.#drewFromDiscard;
+  }
+
+  public setDiscardCard(card: Card | null = null): void {
+    this.#discardCardDrawn = card;
+  }
+
+  public setHasDrawnFromDiscard(value: boolean = false): void {
+    this.#drewFromDiscard = value;
   }
 
   public drawCard(playerIndex: number): boolean {
@@ -124,6 +173,32 @@ export class Remi {
     return true;
   }
 
+  public restoreState(snapshot: {
+    hand: Card[];
+    melds: Card[][];
+    phase: GamePhase;
+  }): void {
+    // Deep restore hand with new instances
+    this.#playerHands[0] = snapshot.hand.map(card => {
+      const restored = new Card(card.suit, card.value);
+      if (card.isFaceUp) restored.flip();
+      return restored;
+    });
+
+    // Deep restore melds
+    this.#playerMelds[0] = snapshot.melds.map(meld =>
+      meld.map(card => {
+        const restored = new Card(card.suit, card.value);
+        if (card.isFaceUp) restored.flip();
+        return restored;
+      })
+    );
+
+    this.#phase = snapshot.phase;
+    this.#currentMelds = [];
+    this.#currentScore = 0;
+  }
+
   public drawFromDiscard(playerIndex: number): boolean {
     if (this.#phase !== GamePhase.DRAW) return false;
     if (playerIndex !== this.#currentPlayer) return false;
@@ -143,6 +218,64 @@ export class Remi {
     });
 
     this.setPhase(GamePhase.MELD);
+    return true;
+  }
+
+  public takeFinishingCard(playerIndex: number): boolean {
+    if (this.#phase !== GamePhase.DRAW) return false;
+    if (playerIndex !== this.#currentPlayer) return false;
+    if (!this.#finishingCard) return false;
+    if (this.#playerHands[playerIndex].length >= 15 || this.#playerHands[playerIndex].length < 14) return false;
+
+    const card = this.#finishingCard;
+    this.#finishingCard = null;
+    card.flip();
+    this.#playerHands[playerIndex].push(card);
+
+    this.#events.emit({
+      type: GameEventType.FINISHING_CARD,
+      timestamp: Date.now(),
+      playerIndex,
+      card,
+      handSize: this.#playerHands[playerIndex].length,
+    });
+
+    this.setPhase(GamePhase.MELD);
+    return true;
+  }
+
+  public saveGameStateSnapshot(): void {
+    const hand = this.getPlayerHand(0);
+    const melds = this.getPlayerMelds(0);
+    const phase = this.getState().phase;
+
+    this.gameStateSnapshot = {
+      hand: hand, // Deep copy
+      melds: melds,
+      phase
+    };
+
+    console.log('Game state saved for potential undo');
+  }
+
+  // Add to Remi class
+
+
+  public returnCardToDiscard(card: Card): void {
+    // Add card back to top of discard pile
+    this.#deck.discardPile.push(card);
+  }
+
+  public removeLastMeld(playerIndex: number): boolean {
+    const melds = this.#playerMelds[playerIndex];
+    if (melds.length === 0) return false;
+
+    const removedMeld = melds.pop()!;
+
+    // Return cards to hand
+    const hand = this.#playerHands[playerIndex];
+    removedMeld.forEach(card => hand.push(card));
+
     return true;
   }
 
@@ -325,6 +458,8 @@ export class Remi {
     hand.splice(idx, 1);
     meld.push(card);
 
+    this.#sortAndRepositionMeld(meld);
+
     // Emit
     this.#events.emit({
       type: GameEventType.CARD_ADDED_TO_MELD,
@@ -337,6 +472,24 @@ export class Remi {
     });
 
     return true;
+  }
+
+  #sortAndRepositionMeld(meld: Card[]): void {
+    // Determine if it's a set or run and sort accordingly
+    if (this.#isValidSet(meld)) {
+      // For sets, order doesn't matter much, but keep jokers at end
+      meld.sort((a, b) => {
+        if (this.#isJoker(a)) return 1;
+        if (this.#isJoker(b)) return -1;
+        return a.suit.localeCompare(b.suit);
+      });
+    } else if (this.#isValidRun(meld)) {
+      // For runs, use the same sorting as when laying down melds
+      const sorted = this.#sortRunCards(meld);
+      // Replace meld contents with sorted version
+      meld.length = 0;
+      meld.push(...sorted);
+    }
   }
 
   #doesCardReplaceJoker(card: Card, joker: Card, meld: Card[]): boolean {
@@ -354,32 +507,26 @@ export class Remi {
     const allDifferentSuits = new Set(regularCards.map(c => c.suit)).size === regularCards.length;
 
     if (allSameValue && allDifferentSuits) {
-      // This is a SET
-      // RULE: Joker can only be replaced when completing the 4th card of a set
-      // Current meld has: regularCards.length regular cards + 1 joker
-      // After adding the new card, we'll have: regularCards.length + 1 regular cards + 1 joker
-
-      // The joker can only be replaced if:
-      // 1. The current meld already has 3 regular cards (so adding 4th completes the set)
-      // 2. The new card has the same value but different suit
-
-      if (regularCards.length < 3) {
-        // Not enough cards yet - joker stays in the meld
-        return false;
-      }
 
       // We have 3+ regular cards, check if the new card completes the set
       const isCorrectValue = card.value === regularCards[0].value;
       const isUniqueSuit = !regularCards.some(c => c.suit === card.suit);
-      return isCorrectValue && isUniqueSuit;
+      const totalAfterReplacement = regularCards.length + 1;
+      const withinLimit = totalAfterReplacement <= 4;
+
+      return isCorrectValue && isUniqueSuit && withinLimit;
     }
 
     // Check if it's a RUN
     const allSameSuit = regularCards.every(c => c.suit === regularCards[0].suit);
 
     if (allSameSuit) {
-      // This is a RUN - determine what value the joker represents
-      const jokerRepresentsValue = this.#getJokerRepresentedValueInRun(joker, meld);
+      // This is a RUN
+      // FIX: Sort the meld first to get proper sequence
+      const sortedMeld = this.#sortRunCards(meld);
+
+      // Determine what value the joker represents in the SORTED meld
+      const jokerRepresentsValue = this.#getJokerRepresentedValueInRun(joker, sortedMeld);
 
       // The card replaces the joker if it's the right suit and right value
       const isCorrectSuit = card.suit === regularCards[0].suit;
@@ -478,7 +625,7 @@ export class Remi {
     return this.#playersHaveOpened[playerIndex] || false;
   }
 
-  private setPhase(newPhase: GamePhase): void {
+  public setPhase(newPhase: GamePhase): void {
     this.#phase = newPhase;
     this.#events.emit({
       type: GameEventType.PHASE_CHANGED,
@@ -680,9 +827,9 @@ export class Remi {
 
     // 1. Separate regular cards to check suits
     const regularCards = cards.filter(c => !this.#isJoker(c));
-    
+
     // Allow runs of pure jokers (e.g. 3 jokers)
-    if (regularCards.length === 0) return false; 
+    if (regularCards.length === 0) return false;
 
     // 2. Suit Check: All regular cards must be same suit
     const targetSuit = regularCards[0].suit;
@@ -694,14 +841,14 @@ export class Remi {
 
     // 4. Positional Gap Check (on sorted cards)
     return this.#validatePositionalRun(sortedCards);
-}
+  }
 
-#sortRunCards(cards: Card[]): Card[] {
+  #sortRunCards(cards: Card[]): Card[] {
     // Create array with indices to track joker positions
     const indexed = cards.map((card, index) => ({
-        card,
-        originalIndex: index,
-        isJoker: this.#isJoker(card)
+      card,
+      originalIndex: index,
+      isJoker: this.#isJoker(card)
     }));
 
     // Separate jokers and regular cards
@@ -710,11 +857,11 @@ export class Remi {
 
     // Sort regular cards by value
     regulars.sort((a, b) => {
-        // Handle Ace - check if we need high ace (with high cards) or low ace
-        const hasHighCards = regulars.some(r => r.card.value >= 11);
-        const aVal = a.card.value === 1 && hasHighCards ? 14 : a.card.value;
-        const bVal = b.card.value === 1 && hasHighCards ? 14 : b.card.value;
-        return aVal - bVal;
+      // Handle Ace - check if we need high ace (with high cards) or low ace
+      const hasHighCards = regulars.some(r => r.card.value >= 11);
+      const aVal = a.card.value === 1 && hasHighCards ? 14 : a.card.value;
+      const bVal = b.card.value === 1 && hasHighCards ? 14 : b.card.value;
+      return aVal - bVal;
     });
 
     // Now we need to interleave jokers back in logical positions
@@ -723,32 +870,32 @@ export class Remi {
     let jokerIdx = 0;
 
     for (let i = 0; i < regulars.length; i++) {
-        const current = regulars[i].card;
-        const next = regulars[i + 1]?.card;
+      const current = regulars[i].card;
+      const next = regulars[i + 1]?.card;
 
-        result.push(current);
+      result.push(current);
 
-        if (next) {
-            // Calculate gap between current and next card
-            const currentVal = current.value === 1 && next.value >= 11 ? 14 : current.value;
-            const nextVal = next.value === 1 && current.value >= 11 ? 14 : next.value;
-            const gap = nextVal - currentVal - 1;
+      if (next) {
+        // Calculate gap between current and next card
+        const currentVal = current.value === 1 && next.value >= 11 ? 14 : current.value;
+        const nextVal = next.value === 1 && current.value >= 11 ? 14 : next.value;
+        const gap = nextVal - currentVal - 1;
 
-            // Insert jokers to fill the gap
-            const jokersToInsert = Math.min(gap, jokers.length - jokerIdx);
-            for (let j = 0; j < jokersToInsert; j++) {
-                result.push(jokers[jokerIdx++].card);
-            }
+        // Insert jokers to fill the gap
+        const jokersToInsert = Math.min(gap, jokers.length - jokerIdx);
+        for (let j = 0; j < jokersToInsert; j++) {
+          result.push(jokers[jokerIdx++].card);
         }
+      }
     }
 
     // Add any remaining jokers at the end
     while (jokerIdx < jokers.length) {
-        result.push(jokers[jokerIdx++].card);
+      result.push(jokers[jokerIdx++].card);
     }
 
     return result;
-}
+  }
 
   /**
    * Validates that the EXACT sequence provided by the player is valid.
@@ -928,11 +1075,22 @@ export class Remi {
   }
 
   #canCardsBeAdjacent(card1: Card, card2: Card): boolean {
-    // Rule: Cannot have adjacent jokers in selection
+    // Rule 1: Cannot have adjacent jokers
     if (this.#isJoker(card1) && this.#isJoker(card2)) {
       return false;
     }
-    return true;
+
+    // Rule 2: If one is joker, allow it (joker is flexible)
+    if (this.#isJoker(card1) || this.#isJoker(card2)) {
+      return true;
+    }
+
+    // Rule 3: Both regular cards - they must be compatible
+    // For now, just check if same suit OR same value
+    const sameSuit = card1.suit === card2.suit;
+    const sameValue = card1.value === card2.value;
+
+    return sameSuit || sameValue;
   }
 
   #isJoker(card: Card): boolean {
